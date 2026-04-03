@@ -1,0 +1,2092 @@
+import { useState, useEffect, useMemo } from "react";
+import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Slider } from "@/components/ui/slider";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useToast } from "@/components/ui/use-toast";
+import LiveOddsTicker from "@/components/LiveOddsTicker";
+import MatrixRain from "@/components/MatrixRain";
+import {
+  Loader2,
+  Copy,
+  TrendingUp,
+  Zap,
+  Target,
+  BarChart3,
+  Shield,
+  ChevronRight,
+  Trophy,
+  Brain,
+  LineChart as LineChartIcon,
+  DollarSign,
+  Percent,
+  Home,
+  Plane,
+  Activity,
+  Calendar,
+  Mail,
+  Crown,
+  Check,
+  Lock,
+  Heart,
+  Star,
+  Bitcoin,
+  Flame,
+} from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from "recharts";
+import {
+  analyzeGame,
+  parseGameInput,
+  formatOdds,
+  formatProb,
+  formatEdge,
+  formatMoney,
+  generateBacktestData,
+  calculateBacktestSummary,
+  generatePerformanceData,
+  SPORT_CONFIG,
+  type GamePrediction,
+  type Sport,
+  type BacktestSummary,
+  type PerformanceData
+} from "@/lib/predictions";
+import { fetchLiveGamesForSport, type LiveMarketGame } from "@/lib/liveSports";
+import {
+  getAuthChangeEventName,
+  getCurrentSiteUser,
+  signOutSiteUser,
+  type SiteUser,
+} from "@/lib/auth";
+import {
+  getAccessChangeEventName,
+  getAccessState,
+  getCurrentCryptoAccount,
+  redirectToCheckout,
+  signOutAccessSession,
+  PREMIUM_FEATURES,
+  FREE_FEATURES,
+} from "@/lib/stripe";
+import CryptoPaymentModal, { type UnlockType } from "@/components/CryptoPaymentModal";
+import AccessSessionDialog from "@/components/AccessSessionDialog";
+import SubstackEmbed from "@/components/SubstackEmbed";
+import { createExecutionBoardEntry } from "@/lib/executionBoard";
+
+const ETH_DONATION_ADDRESS = "0x6f278ce76ba5ed31fd9be646d074863e126836e9";
+
+const Index = () => {
+  const [gameInput, setGameInput] = useState("");
+  const [bettingAdvice, setBettingAdvice] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [liveGames, setLiveGames] = useState<LiveMarketGame[]>([]);
+  const [isSlateLoading, setIsSlateLoading] = useState(true);
+  const [liveSlateError, setLiveSlateError] = useState<string | null>(null);
+  const [liveSlateUpdatedAt, setLiveSlateUpdatedAt] = useState<Date | null>(null);
+  const [bankroll, setBankroll] = useState(1000);
+  const [minEdge, setMinEdge] = useState(3);
+  const [kellyFraction, setKellyFraction] = useState(0.25);
+  const [selectedSport, setSelectedSport] = useState<Sport>('nba');
+  const [backtestSummary, setBacktestSummary] = useState<BacktestSummary | null>(null);
+  const [isBacktesting, setIsBacktesting] = useState(false);
+  const [access, setAccess] = useState(getAccessState());
+  const [cryptoAccount, setCryptoAccount] = useState(getCurrentCryptoAccount());
+  const [siteUser, setSiteUser] = useState<SiteUser | null>(getCurrentSiteUser());
+  const [performanceData, setPerformanceData] = useState<PerformanceData | null>(null);
+  const [showCryptoModal, setShowCryptoModal] = useState(false);
+  const [showAccessDialog, setShowAccessDialog] = useState(false);
+  const [cryptoUnlockType, setCryptoUnlockType] = useState<UnlockType>("big-game");
+  const { toast } = useToast();
+  const hasPaidAccess = access.tier !== "free";
+  const hasFullVaultAccess = access.tier === "premium";
+
+  const syncAccessUi = () => {
+    setAccess(getAccessState());
+    setCryptoAccount(getCurrentCryptoAccount());
+    setSiteUser(getCurrentSiteUser());
+  };
+
+  useEffect(() => {
+    syncAccessUi();
+
+    const handleAccessChange = () => {
+      syncAccessUi();
+    };
+
+    window.addEventListener(getAuthChangeEventName(), handleAccessChange);
+    window.addEventListener(getAccessChangeEventName(), handleAccessChange);
+    return () => {
+      window.removeEventListener(getAuthChangeEventName(), handleAccessChange);
+      window.removeEventListener(getAccessChangeEventName(), handleAccessChange);
+    };
+  }, []);
+
+  // Handle upgrade to premium
+  const handleUpgrade = async (type: 'premium' | 'one-time' = 'premium') => {
+    try {
+      await redirectToCheckout(type);
+    } catch (error) {
+      toast({
+        title: "Checkout unavailable",
+        description:
+          error instanceof Error ? error.message : "We could not start Stripe Checkout right now.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Copy ETH address to clipboard
+  const copyEthAddress = async () => {
+    try {
+      await navigator.clipboard.writeText(ETH_DONATION_ADDRESS);
+      toast({
+        title: "Address Copied!",
+        description: "ETH donation address copied to clipboard",
+      });
+    } catch {
+      toast({
+        title: "Failed to copy",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Load live slate for selected sport
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLiveSlate = async () => {
+      try {
+        setIsSlateLoading(true);
+        const games = await fetchLiveGamesForSport(selectedSport);
+        if (cancelled) return;
+        setLiveGames(games);
+        setLiveSlateUpdatedAt(new Date());
+        setLiveSlateError(null);
+      } catch {
+        if (cancelled) return;
+        setLiveSlateError("Live market board unavailable right now.");
+      } finally {
+        if (!cancelled) {
+          setIsSlateLoading(false);
+        }
+      }
+    };
+
+    void loadLiveSlate();
+    const intervalId = window.setInterval(loadLiveSlate, 60_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [selectedSport]);
+
+  // Generate backtest data when sport changes
+  const runBacktest = () => {
+    setIsBacktesting(true);
+    setTimeout(() => {
+      const results = generateBacktestData(selectedSport, 6);
+      const summary = calculateBacktestSummary(results);
+      setBacktestSummary(summary);
+      setIsBacktesting(false);
+      toast({
+        title: "Backtest Complete",
+        description: `Analyzed ${summary.totalGames} games with ${(summary.accuracy * 100).toFixed(1)}% accuracy`,
+      });
+    }, 500);
+  };
+
+  const analyzedGames = useMemo<Array<{ game: LiveMarketGame; prediction: GamePrediction | null }>>(() => {
+    return liveGames.map((game) => ({
+      game,
+      prediction: game.odds
+        ? analyzeGame(game.homeTeam, game.awayTeam, selectedSport, bankroll, minEdge, kellyFraction, {
+            id: game.id,
+            bookmaker: game.bookmaker,
+            commenceTime: game.date,
+            homeOdds: game.odds.homeMoneyline,
+            awayOdds: game.odds.awayMoneyline,
+            homeOpenOdds: game.odds.homeMoneylineOpen,
+            awayOpenOdds: game.odds.awayMoneylineOpen,
+            isLive: game.status.state === "in",
+          })
+        : null,
+    }));
+  }, [bankroll, kellyFraction, liveGames, minEdge, selectedSport]);
+
+  const valueBets = useMemo(
+    () => analyzedGames.flatMap(({ prediction }) => (prediction?.valueBet ? [prediction] : [])),
+    [analyzedGames],
+  );
+  
+  const sportName = useMemo(() => SPORT_CONFIG[selectedSport].name, [selectedSport]);
+
+  const analyzeBetting = async () => {
+    if (!gameInput.trim()) {
+      toast({
+        title: "Please enter a game",
+        description: "The game field cannot be empty",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      
+      // Parse the input to find teams
+      const parsed = parseGameInput(gameInput, selectedSport);
+      
+      if (!parsed) {
+        toast({
+          title: "Could not identify teams",
+          description: `Try entering ${sportName} team names like 'Lakers vs Warriors'`,
+          variant: "destructive",
+        });
+        setIsLoading(false);
+        return;
+      }
+      
+      // Run ML prediction
+      const prediction = analyzeGame(parsed.homeTeam, parsed.awayTeam, selectedSport, bankroll, minEdge, kellyFraction);
+      
+      let recommendation = "";
+      let betDetails = "";
+      
+      if (prediction.valueBet) {
+        recommendation = `${prediction.valueBet.team.toUpperCase()} MONEYLINE`;
+        betDetails = `VALUE BET DETECTED!
+Edge: ${formatEdge(prediction.valueBet.edge)}
+Kelly Stake: ${(prediction.valueBet.kellyPct * 100).toFixed(1)}% of bankroll
+Suggested Bet: $${prediction.valueBet.suggestedBet.toFixed(2)}`;
+      } else {
+        recommendation = `${prediction.predictedWinner.toUpperCase()} (No Value)`;
+        betDetails = `No value bet found (edge < ${minEdge}%)
+Home Edge: ${formatEdge(prediction.homeEdge)}
+Away Edge: ${formatEdge(prediction.awayEdge)}`;
+      }
+      
+      const advice = `ML PREDICTION: ${prediction.predictedWinner}
+CONFIDENCE: ${formatProb(prediction.confidence)}
+
+RECOMMENDATION: ${recommendation}
+
+MATCHUP ANALYSIS:
+${prediction.homeTeam} (Home): ${formatProb(prediction.homeProb)} win probability
+  - Odds: ${formatOdds(prediction.homeOdds)} (Implied: ${formatProb(prediction.homeImpliedProb)})
+  - Edge: ${formatEdge(prediction.homeEdge)}
+
+${prediction.awayTeam} (Away): ${formatProb(prediction.awayProb)} win probability
+  - Odds: ${formatOdds(prediction.awayOdds)} (Implied: ${formatProb(prediction.awayImpliedProb)})
+  - Edge: ${formatEdge(prediction.awayEdge)}
+
+${betDetails}
+
+BANKROLL: $${bankroll} | Kelly Fraction: ${(kellyFraction * 100).toFixed(0)}%
+
+Always bet responsibly. Past performance does not guarantee future results.`;
+      
+      setBettingAdvice(advice);
+      toast({
+        title: "ML Analysis Complete",
+        description: `Predicted winner: ${prediction.predictedWinner} (${formatProb(prediction.confidence)})`,
+      });
+    } catch (error) {
+      toast({
+        title: "Error analyzing game",
+        description: "Please try again later",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(bettingAdvice);
+      toast({
+        title: "Copied!",
+        description: "Analysis copied to clipboard",
+      });
+    } catch (error) {
+      toast({
+        title: "Failed to copy",
+        description: "Please try again",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const features = [
+    {
+      icon: Brain,
+      title: "AI-Powered Analysis",
+      description: "Advanced machine learning models analyze thousands of data points in seconds"
+    },
+    {
+      icon: LineChartIcon,
+      title: "Real-Time Odds",
+      description: "Track line movements and find value before the market adjusts"
+    },
+    {
+      icon: Target,
+      title: "High Accuracy",
+      description: "Our models consistently outperform traditional handicapping methods"
+    },
+    {
+      icon: Shield,
+      title: "Bankroll Protection",
+      description: "Smart stake sizing recommendations to protect your investment"
+    }
+  ];
+
+  const executionBoardEntries = useMemo(() => {
+    return analyzedGames
+      .flatMap(({ game, prediction }) => {
+        if (!prediction) return [];
+        const entry = createExecutionBoardEntry(game, prediction);
+        return entry ? [entry] : [];
+      })
+      .sort((a, b) => b.score - a.score);
+  }, [analyzedGames]);
+
+  const terminalStats = useMemo(() => {
+    const bestEntry = executionBoardEntries[0];
+    const averageExecEdge = executionBoardEntries.length
+      ? executionBoardEntries.reduce((sum, entry) => sum + entry.executionAdjustedEdge, 0) / executionBoardEntries.length
+      : 0;
+
+    return [
+      {
+        label: "Tracked edges",
+        value: String(executionBoardEntries.length),
+        accent: "text-white",
+        detail: "Rows with real prices and board-qualified edge",
+      },
+      {
+        label: "Live games",
+        value: String(liveGames.filter((game) => game.status.state === "in").length),
+        accent: "text-emerald-300",
+        detail: "Active games the desk is monitoring right now",
+      },
+      {
+        label: "Best exec edge",
+        value: bestEntry ? formatEdge(bestEntry.executionAdjustedEdge) : "Pass",
+        accent: "text-brand-300",
+        detail: bestEntry ? `${bestEntry.recommendedSide} at ${bestEntry.summary.line}` : "No row clears threshold yet",
+      },
+      {
+        label: "Desk average",
+        value: executionBoardEntries.length ? formatEdge(averageExecEdge) : "0.0%",
+        accent: "text-yellow-300",
+        detail: "Average execution-adjusted edge across tracked rows",
+      },
+    ];
+  }, [executionBoardEntries, liveGames]);
+
+  const marketPulse = useMemo(() => {
+    return analyzedGames
+      .filter(({ game, prediction }) => game.odds && prediction)
+      .map(({ game, prediction }) => ({
+        id: game.id,
+        matchup: `${game.awayAbbr} @ ${game.homeAbbr}`,
+        state: game.status.shortDetail,
+        movement: prediction!.executionFactors.openToCurrentDelta,
+        execEdge: prediction!.executionAdjustedEdge,
+        signal: prediction!.predictedWinner,
+      }))
+      .sort((a, b) => Math.abs(b.movement) - Math.abs(a.movement))
+      .slice(0, 3);
+  }, [analyzedGames]);
+
+  const deskProtocols = [
+    "Signal first. Price second. Proof always.",
+    "If the market is stale, surface it. If the edge is gone, pass.",
+    "Show the number, the timing, and whether we beat the close.",
+  ];
+
+  const scrollToSection = (sectionId: string) => {
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const scrollToPricing = () => {
+    scrollToSection("pricing");
+  };
+
+  const sportsRepoGroups = [
+    {
+      title: "Product Surface",
+      summary: "The public-facing experience, subscriptions, and model-backed picks.",
+      repos: [
+        { name: "ai-advantage", role: "Main product", desc: "The live app for picks, model demos, pricing, and upgrade flow.", url: "https://github.com/ianalloway/ai-advantage" },
+        { name: "sports-betting-ml", role: "Model pipeline", desc: "End-to-end ML workflow for sports prediction, feature engineering, serving, and demo packaging.", url: "https://github.com/ianalloway/sports-betting-ml" },
+      ],
+    },
+    {
+      title: "Ratings And Evaluation",
+      summary: "The libraries and dashboards that turn picks into inspectable systems.",
+      repos: [
+        { name: "nba-ratings", role: "Ratings core", desc: "Elo, logistic win probability, and Kelly helpers for NBA-style models.", url: "https://github.com/ianalloway/nba-ratings" },
+        { name: "nba-edge", role: "Edge finder", desc: "Power ratings, spread edge detection, and half-Kelly portfolio sizing with backtests.", url: "https://github.com/ianalloway/nba-edge" },
+        { name: "nba-clv-dashboard", role: "Evaluation dashboard", desc: "Calibration, rolling accuracy, and CLV-style reporting to see whether the model is actually working.", url: "https://github.com/ianalloway/nba-clv-dashboard" },
+        { name: "backtest-report-gen", role: "Report generator", desc: "Static HTML reports for calibration, Brier score, CLV, and bet ledgers.", url: "https://github.com/ianalloway/backtest-report-gen" },
+        { name: "metric-regression-gate", role: "CI quality gate", desc: "Stops metrics regressions from slipping through by comparing new results to baseline performance.", url: "https://github.com/ianalloway/metric-regression-gate" },
+      ],
+    },
+    {
+      title: "Odds And Execution",
+      summary: "The tooling layer for prices, movement, bankroll sizing, and close tracking.",
+      repos: [
+        { name: "odds-cli", role: "Terminal odds tool", desc: "Check live odds, compare books, find value, and calculate Kelly sizing from the command line.", url: "https://github.com/ianalloway/odds-cli" },
+        { name: "odds-drift-watch", role: "Line-move alerts", desc: "Webhook-based alerts for odds drift with FastAPI, SQLite, and line shock logic.", url: "https://github.com/ianalloway/odds-drift-watch" },
+        { name: "closing-line-archive", role: "Snapshot archive", desc: "SQLite CLI for sportsbook odds snapshots and beat-close analysis.", url: "https://github.com/ianalloway/closing-line-archive" },
+        { name: "kelly-js", role: "Sizing library", desc: "TypeScript Kelly Criterion utilities for bankroll sizing, CLV tracking, and odds conversion.", url: "https://github.com/ianalloway/kelly-js" },
+      ],
+    },
+    {
+      title: "Research And Ecosystem",
+      summary: "Supporting resources, reusable packages, and the broader sports-analytics toolkit around the app.",
+      repos: [
+        { name: "awesome-sports-betting", role: "Resource map", desc: "A curated list of APIs, tools, datasets, books, and models across the sports betting space.", url: "https://github.com/ianalloway/awesome-sports-betting" },
+        { name: "allowayai", role: "R toolkit", desc: "R utilities for AI and sports analytics workflows.", url: "https://github.com/ianalloway/allowayai" },
+        { name: "allowayai-demo", role: "Live demo", desc: "Interactive demo for the R package, including Kelly helpers and sports model utilities.", url: "https://github.com/ianalloway/allowayai-demo" },
+        { name: "openclaw-skills", role: "Agent workflows", desc: "Sports-odds and Kelly-related skills that support agent-driven research and automation workflows.", url: "https://github.com/ianalloway/openclaw-skills" },
+      ],
+    },
+  ];
+
+  const executionFormulaTerms = [
+    { label: "Raw edge", value: "Model win probability minus implied market probability", accent: "text-white" },
+    { label: "Calibration factor", value: "Discount stale models using rolling Brier, log-loss, and calibration buckets", accent: "text-brand-300" },
+    { label: "CLV factor", value: "Reward signals that consistently beat the closing number", accent: "text-green-300" },
+    { label: "Timing factor", value: "Reward alerts caught before steam fully lands", accent: "text-sky-300" },
+    { label: "Risk penalties", value: "Subtract correlation risk and news volatility before sizing", accent: "text-yellow-300" },
+  ];
+
+  const executionSystemSteps = [
+    "Model the game better than the market on a narrow slice of spots",
+    "Capture a better number than the market eventually closes at",
+    "Alert before the edge decays and size with quarter-Kelly discipline",
+    "Grade every alert against CLV, calibration, and bankroll outcome",
+  ];
+
+  const growthRoadmap = [
+    { phase: "Phase 1", title: "Prove the signal", detail: "Track open, current, and closing line on every surfaced bet. Gate the model on CLV and calibration, not just short-run ROI." },
+    { phase: "Phase 2", title: "Improve execution", detail: "Add stale-number detection, alert windows, and book disagreement scoring so timing becomes part of the product." },
+    { phase: "Phase 3", title: "Productize trust", detail: "Ship an execution board, CLV console, and public proof page that show why the edge deserves payment." },
+  ];
+
+  const topExecutionEntries = executionBoardEntries.slice(0, 3);
+
+  const heroExplorationLinks = useMemo(
+    () => [
+      {
+        key: "live-desk",
+        eyebrow: "Live Hunt",
+        title: topExecutionEntries[0]
+          ? `Track ${topExecutionEntries[0].recommendedSide} before the number moves`
+          : "Open the live board before the market wakes up",
+        description: topExecutionEntries[0]
+          ? `${topExecutionEntries[0].eventLabel} is the strongest execution lead on the desk right now.`
+          : "Jump straight into the desk and see whether anything on the slate is actually worth acting on.",
+        cta: "Open live desk",
+        kind: "link" as const,
+        href: "/daily-picks",
+        accent: "text-brand-300",
+        border: "border-brand-500/25 hover:border-brand-400/50",
+        glow: "hover:shadow-[0_18px_50px_rgba(56,189,248,0.12)]",
+        icon: Activity,
+      },
+      {
+        key: "proof-ledger",
+        eyebrow: "Proof Audit",
+        title: "See whether the edge survives contact with reality",
+        description: "Open the ledger, inspect tracked rows, and check the proof trail before you trust the pitch.",
+        cta: "Inspect proof ledger",
+        kind: "link" as const,
+        href: "/leaderboard",
+        accent: "text-yellow-300",
+        border: "border-yellow-500/20 hover:border-yellow-400/45",
+        glow: "hover:shadow-[0_18px_50px_rgba(250,204,21,0.10)]",
+        icon: Trophy,
+      },
+      {
+        key: "manual-probe",
+        eyebrow: "Manual Probe",
+        title: "Pressure-test your own matchup",
+        description: "Drop in any game and make the model tell you whether it has conviction or whether it should pass.",
+        cta: "Jump to analyzer",
+        kind: "scroll" as const,
+        target: "model-suite",
+        accent: "text-emerald-300",
+        border: "border-emerald-500/20 hover:border-emerald-400/45",
+        glow: "hover:shadow-[0_18px_50px_rgba(52,211,153,0.10)]",
+        icon: Brain,
+      },
+      {
+        key: "premium-layer",
+        eyebrow: hasPaidAccess ? "Unlocked" : "Locked Layer",
+        title: hasPaidAccess
+          ? "You already have the deeper terminal unlocked"
+          : "Peek at the part of the product that is not public",
+        description: hasPaidAccess
+          ? "Skip the free surface and go straight to the premium board, archive, and workflow tools."
+          : "The premium layer is where the archive, deeper workflow tools, and long-memory edge tracking live.",
+        cta: hasPaidAccess ? "Review premium section" : "See what is behind the wall",
+        kind: "scroll" as const,
+        target: "pricing",
+        accent: "text-purple-300",
+        border: "border-purple-500/20 hover:border-purple-400/45",
+        glow: "hover:shadow-[0_18px_50px_rgba(168,85,247,0.10)]",
+        icon: Crown,
+      },
+    ],
+    [hasPaidAccess, topExecutionEntries],
+  );
+
+  return (
+    <div className="min-h-screen bg-background relative overflow-hidden">
+      <a
+        href="#main-content"
+        className="sr-only z-50 rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white focus:not-sr-only focus:absolute focus:left-4 focus:top-4"
+      >
+        Skip to main content
+      </a>
+      <MatrixRain />
+      {/* Live Odds Ticker */}
+      <LiveOddsTicker speed={45} pauseOnHover />
+
+      <header className="relative z-20 border-b border-border/70 bg-black/70 backdrop-blur-md">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-brand-500/30 bg-brand-500/10">
+              <TrendingUp className="h-5 w-5 text-brand-400" />
+            </div>
+            <div>
+              <p className="text-white font-semibold tracking-tight">AI Advantage Sports</p>
+              <p className="text-xs text-muted-foreground">Evaluation-first betting intelligence</p>
+            </div>
+          </div>
+
+          <nav className="hidden md:flex items-center gap-6 text-sm">
+            <a href="#model-suite" className="text-muted-foreground hover:text-white transition-colors">Model Suite</a>
+            <a href="/daily-picks" className="text-muted-foreground hover:text-white transition-colors">Daily Picks</a>
+            <a href="/leaderboard" className="text-muted-foreground hover:text-white transition-colors">Proof Ledger</a>
+            {siteUser ? (
+              <Link to="/profile" className="text-muted-foreground hover:text-white transition-colors">
+                My Profile
+              </Link>
+            ) : null}
+            <a href="#edge-system" className="text-muted-foreground hover:text-white transition-colors">Edge</a>
+            <a href="#sports-stack" className="text-muted-foreground hover:text-white transition-colors">Stack</a>
+            <a href="#pricing" className="text-muted-foreground hover:text-white transition-colors">Pricing</a>
+          </nav>
+
+          <div className="flex items-center gap-2">
+            {hasPaidAccess ? (
+              <Badge variant="outline" className="hidden border-emerald-400/30 bg-emerald-400/10 text-emerald-300 md:inline-flex">
+                {cryptoAccount ? `${access.label} logged in` : access.label}
+              </Badge>
+            ) : null}
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-white/10 text-zinc-200 hover:bg-white/[0.06]"
+              onClick={() => setShowAccessDialog(true)}
+            >
+              {cryptoAccount ? "Paid access" : "Restore pass"}
+            </Button>
+            {siteUser ? (
+              <Button
+                asChild
+                variant="outline"
+                size="sm"
+                className="border-white/10 text-zinc-200 hover:bg-white/[0.06]"
+              >
+                <Link to="/profile">
+                  {siteUser.username ? `@${siteUser.username}` : "My Profile"}
+                </Link>
+              </Button>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-white/10 text-zinc-200 hover:bg-white/[0.06]"
+                  asChild
+                >
+                  <Link to="/login">Log in</Link>
+                </Button>
+                <Button
+                  size="sm"
+                  className="bg-white text-black hover:bg-zinc-200"
+                  asChild
+                >
+                  <Link to="/signup">Create account</Link>
+                </Button>
+              </>
+            )}
+            {siteUser ? (
+              <Button
+                size="sm"
+                className="bg-white text-black hover:bg-zinc-200"
+                onClick={() => {
+                  signOutSiteUser();
+                  syncAccessUi();
+                  toast({
+                    title: "Logged out",
+                    description: "Your site account has been logged out.",
+                  });
+                }}
+              >
+                Log out
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </header>
+
+      {/* Hero Section */}
+      <main id="main-content">
+      <section className="relative overflow-hidden border-b border-border/60">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.16),_transparent_28%),radial-gradient(circle_at_85%_18%,_rgba(250,204,21,0.12),_transparent_26%),linear-gradient(180deg,rgba(2,6,23,0.98),rgba(4,10,24,0.98))]" />
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand-400/60 to-transparent" />
+        <div className="absolute left-[14%] top-24 h-56 w-56 rounded-full bg-brand-500/10 blur-3xl" />
+        <div className="absolute right-[12%] top-16 h-48 w-48 rounded-full bg-yellow-400/10 blur-3xl" />
+
+        <div className="relative max-w-6xl mx-auto px-6 py-16 md:py-20">
+          <div className="grid gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:items-start">
+            <div className="space-y-6">
+              <div className="inline-flex items-center gap-2 rounded-full border border-brand-500/20 bg-brand-500/10 px-4 py-2 text-sm font-medium text-brand-300 shadow-[0_0_30px_rgba(56,189,248,0.08)]">
+                <Zap className="h-4 w-4" />
+                Sports Trading Terminal
+              </div>
+
+              <div className="space-y-4">
+                <h1 className="max-w-4xl text-5xl font-extrabold tracking-tight text-white md:text-7xl">
+                  A sharper desk for sports intelligence, execution, and proof.
+                </h1>
+                <p className="max-w-2xl text-lg text-muted-foreground md:text-xl">
+                  AI Advantage now behaves more like an operator terminal than a picks page: live market pulse, tracked execution edges, Kelly-sized entries, and proof views built to survive scrutiny.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-3 pt-2">
+                <Button size="lg" className="bg-brand-600 px-8 font-bold text-white hover:bg-brand-700" asChild>
+                  <Link to="/daily-picks">
+                    <Star className="mr-2 h-5 w-5" />
+                    Open The Live Desk
+                  </Link>
+                </Button>
+                <Button
+                  size="lg"
+                  variant="outline"
+                  className="border-white/15 bg-white/[0.03] px-8 font-bold text-gray-200 hover:bg-white/[0.07]"
+                  asChild
+                >
+                  <Link to="/leaderboard">
+                    <Trophy className="mr-2 h-5 w-5 text-yellow-300" />
+                    See Proof Ledger
+                  </Link>
+                </Button>
+                <Button
+                  size="lg"
+                  variant="outline"
+                  className="border-brand-500/40 px-8 font-bold text-brand-300 hover:bg-brand-500/10"
+                  onClick={scrollToPricing}
+                >
+                  <Crown className="mr-2 h-5 w-5 text-yellow-400" />
+                  Unlock Premium Flow
+                </Button>
+              </div>
+
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Four ways to go deeper</p>
+                  <p className="text-xs text-zinc-500">Designed to pull you further into the desk</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {heroExplorationLinks.map((item) => {
+                    const Icon = item.icon;
+                    const sharedClasses = `group rounded-[24px] border bg-white/[0.03] p-5 text-left backdrop-blur-sm transition-all duration-200 hover:-translate-y-1 ${item.border} ${item.glow}`;
+
+                    if (item.kind === "link") {
+                      return (
+                        <Link key={item.key} to={item.href} className={sharedClasses}>
+                          <div className="flex items-start justify-between gap-4">
+                            <div>
+                              <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">{item.eyebrow}</div>
+                              <div className="mt-2 max-w-xs text-lg font-semibold text-white">{item.title}</div>
+                            </div>
+                            <Icon className={`mt-1 h-5 w-5 shrink-0 ${item.accent}`} />
+                          </div>
+                          <p className="mt-3 text-sm leading-relaxed text-zinc-400">{item.description}</p>
+                          <div className={`mt-4 inline-flex items-center gap-2 text-sm font-semibold ${item.accent}`}>
+                            {item.cta}
+                            <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+                          </div>
+                        </Link>
+                      );
+                    }
+
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        onClick={() => scrollToSection(item.target)}
+                        className={sharedClasses}
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">{item.eyebrow}</div>
+                            <div className="mt-2 max-w-xs text-lg font-semibold text-white">{item.title}</div>
+                          </div>
+                          <Icon className={`mt-1 h-5 w-5 shrink-0 ${item.accent}`} />
+                        </div>
+                        <p className="mt-3 text-sm leading-relaxed text-zinc-400">{item.description}</p>
+                        <div className={`mt-4 inline-flex items-center gap-2 text-sm font-semibold ${item.accent}`}>
+                          {item.cta}
+                          <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid gap-3 pt-3 sm:grid-cols-2">
+                {terminalStats.map((item) => (
+                  <div key={item.label} className="rounded-[24px] border border-white/10 bg-white/[0.04] px-5 py-4 backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                    <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">{item.label}</div>
+                    <div className={`mt-2 text-3xl font-black ${item.accent}`}>{item.value}</div>
+                    <div className="mt-2 text-sm leading-relaxed text-zinc-400">{item.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              <div className="overflow-hidden rounded-[32px] border border-white/10 bg-[linear-gradient(180deg,rgba(10,15,28,0.95),rgba(4,8,18,0.98))] shadow-[0_28px_120px_rgba(0,0,0,0.45)]">
+                <div className="border-b border-white/10 px-5 py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.24em] text-brand-300/80">Desk state</div>
+                      <h2 className="mt-1 text-2xl font-bold text-white">Execution terminal</h2>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                      <span className="rounded-full border border-white/10 px-3 py-1">{selectedSport.toUpperCase()} focus</span>
+                      <span className="rounded-full border border-white/10 px-3 py-1">
+                        {liveSlateUpdatedAt ? `Updated ${liveSlateUpdatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "Syncing"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 px-5 py-5">
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                      <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Board rows</div>
+                      <div className="mt-2 text-2xl font-bold text-white">{executionBoardEntries.length}</div>
+                      <div className="mt-1 text-xs text-zinc-500">Tracked entries clearing the desk threshold</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                      <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Posted lines</div>
+                      <div className="mt-2 text-2xl font-bold text-brand-300">{analyzedGames.filter(({ game }) => game.odds).length}</div>
+                      <div className="mt-1 text-xs text-zinc-500">Games with current market pricing on the desk</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                      <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Live pulse</div>
+                      <div className="mt-2 text-2xl font-bold text-emerald-300">{liveGames.filter((game) => game.status.state === "in").length}</div>
+                      <div className="mt-1 text-xs text-zinc-500">Games actively moving while the market reprices</div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[26px] border border-brand-500/20 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_transparent_48%),rgba(255,255,255,0.02)] p-4">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[11px] uppercase tracking-[0.24em] text-brand-300/80">Top board entries</div>
+                        <div className="mt-1 text-lg font-semibold text-white">Best execution opportunities right now</div>
+                      </div>
+                      <div className="text-xs text-zinc-500">Ranked by execution score, not fake hype</div>
+                    </div>
+
+                    {topExecutionEntries.length > 0 ? (
+                      <div className="grid gap-3 md:grid-cols-3">
+                        {topExecutionEntries.map((entry) => (
+                          <Link
+                            key={entry.id}
+                            to="/daily-picks"
+                            className="group rounded-2xl border border-white/10 bg-black/25 p-4 transition-all duration-200 hover:-translate-y-1 hover:border-brand-400/45 hover:bg-black/40"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">{entry.sportLabel}</div>
+                              <div className="font-mono text-xs text-yellow-300">Score {entry.score.toFixed(1)}</div>
+                            </div>
+                            <div className="mt-3 text-lg font-bold text-white">{entry.recommendedSide}</div>
+                            <div className="mt-1 text-sm text-zinc-500">{entry.eventLabel}</div>
+                            <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Entry</div>
+                                <div className="mt-1 font-mono text-white">{entry.summary.line}</div>
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Exec edge</div>
+                                <div className="mt-1 font-semibold text-brand-300">{entry.summary.execution}</div>
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Model</div>
+                                <div className="mt-1 text-white">{entry.summary.model}</div>
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Window</div>
+                                <div className="mt-1 text-white">{entry.executionWindow}</div>
+                              </div>
+                            </div>
+                            <div className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-brand-300">
+                              Follow this signal
+                              <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+                            </div>
+                          </Link>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-2xl border border-white/8 bg-black/20 p-6 text-sm leading-6 text-zinc-400">
+                        No row clears the execution threshold right now. The terminal stays quiet instead of inventing a best bet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-[1.1fr_0.9fr]">
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Market pulse</div>
+                      <div className="mt-1 text-lg font-semibold text-white">Line movement worth watching</div>
+                    </div>
+                    <Activity className="h-4 w-4 text-brand-300" />
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {marketPulse.length > 0 ? marketPulse.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => scrollToSection("model-suite")}
+                        className="w-full rounded-2xl border border-white/8 bg-black/20 p-4 text-left transition-all duration-200 hover:-translate-y-1 hover:border-brand-400/35 hover:bg-black/35"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-semibold text-white">{item.matchup}</div>
+                            <div className="mt-1 text-xs text-zinc-500">{item.state} · signal on {item.signal}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className={`font-mono text-sm ${item.movement <= 0 ? "text-emerald-300" : "text-yellow-300"}`}>
+                              {item.movement > 0 ? "+" : ""}{item.movement.toFixed(3)}
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-500">open to current</div>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex items-center justify-between text-sm">
+                          <span className="text-zinc-500">Exec edge</span>
+                          <span className={`font-semibold ${item.execEdge >= 0 ? "text-brand-300" : "text-red-300"}`}>{formatEdge(item.execEdge)}</span>
+                        </div>
+                        <div className="mt-3 inline-flex items-center gap-2 text-xs font-semibold text-brand-300">
+                          Open this slate
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </div>
+                      </button>
+                    )) : (
+                      <div className="rounded-2xl border border-white/8 bg-black/20 p-4 text-sm text-zinc-400">
+                        Waiting for posted open numbers before the pulse board has anything worth highlighting.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-sm">
+                  <div className="text-[11px] uppercase tracking-[0.24em] text-zinc-500">Desk protocol</div>
+                  <div className="mt-1 text-lg font-semibold text-white">How this terminal thinks</div>
+                  <div className="mt-4 space-y-3">
+                    {deskProtocols.map((item, index) => (
+                      <div key={item} className="flex gap-3 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-brand-500/30 bg-brand-500/10 text-xs font-semibold text-brand-300">
+                          {index + 1}
+                        </div>
+                        <p className="text-sm leading-relaxed text-zinc-400">{item}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ML Predictions Section */}
+      <section id="model-suite" className="py-16 px-6">
+        <div className="max-w-6xl mx-auto">
+          {/* Sport Selector */}
+          <div className="flex items-center justify-center gap-2 mb-6">
+            {(['nba', 'nfl', 'mlb'] as Sport[]).map((sport) => (
+              <Button
+                key={sport}
+                variant={selectedSport === sport ? "default" : "outline"}
+                className={selectedSport === sport 
+                  ? "bg-brand-600 hover:bg-brand-700 text-white" 
+                  : "border-border text-muted-foreground hover:text-white"}
+                onClick={() => {
+                  setSelectedSport(sport);
+                  setBacktestSummary(null);
+                }}
+              >
+                {sport.toUpperCase()}
+              </Button>
+            ))}
+          </div>
+
+                    <Tabs defaultValue="games" className="w-full">
+                      <TabsList className="grid w-full grid-cols-5 mb-8 bg-card border border-border">
+                        <TabsTrigger value="games" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+                          <BarChart3 className="w-4 h-4 mr-2" />
+                          Games
+                        </TabsTrigger>
+                        <TabsTrigger value="value" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+                          <Target className="w-4 h-4 mr-2" />
+                          Value Bets ({valueBets.length})
+                        </TabsTrigger>
+                        <TabsTrigger value="backtest" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+                          <Activity className="w-4 h-4 mr-2" />
+                          Backtest
+                        </TabsTrigger>
+                        <TabsTrigger 
+                          value="performance" 
+                          className="data-[state=active]:bg-brand-600 data-[state=active]:text-white"
+                          onClick={() => !performanceData && setPerformanceData(generatePerformanceData())}
+                        >
+                          <Trophy className="w-4 h-4 mr-2" />
+                          Performance
+                        </TabsTrigger>
+                        <TabsTrigger value="analyze" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+                          <Brain className="w-4 h-4 mr-2" />
+                          Analyze
+                        </TabsTrigger>
+                      </TabsList>
+
+            {/* Today's Games Tab */}
+            <TabsContent value="games" className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-white">{sportName} live market board</h2>
+                  <div className="text-sm text-muted-foreground">
+                    Actual ESPN slate with live scores, statuses, and current market lines.
+                  </div>
+                </div>
+                <div className="text-sm text-muted-foreground">
+                  {liveSlateUpdatedAt
+                    ? `Updated ${liveSlateUpdatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                    : "Syncing live board"}
+                </div>
+              </div>
+
+              {isSlateLoading ? (
+                <div className="rounded-2xl bg-card border border-border p-8 text-center text-muted-foreground">
+                  Loading the current slate...
+                </div>
+              ) : liveSlateError ? (
+                <div className="rounded-2xl border border-red-500/20 bg-red-500/10 p-8 text-center text-red-200">
+                  {liveSlateError}
+                </div>
+              ) : analyzedGames.length === 0 ? (
+                <div className="rounded-2xl bg-card border border-border p-8 text-center text-muted-foreground">
+                  No current {selectedSport.toUpperCase()} games are on the board right now. The app is intentionally showing an empty slate instead of inventing one.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="rounded-2xl bg-card border border-border p-4">
+                      <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Games</div>
+                      <div className="mt-2 text-3xl font-bold text-white">{analyzedGames.length}</div>
+                    </div>
+                    <div className="rounded-2xl bg-card border border-border p-4">
+                      <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Live now</div>
+                      <div className="mt-2 text-3xl font-bold text-green-400">{liveGames.filter((game) => game.status.state === "in").length}</div>
+                    </div>
+                    <div className="rounded-2xl bg-card border border-border p-4">
+                      <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Posted lines</div>
+                      <div className="mt-2 text-3xl font-bold text-brand-400">{analyzedGames.filter(({ game }) => game.odds).length}</div>
+                    </div>
+                    <div className="rounded-2xl bg-card border border-border p-4">
+                      <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Value flags</div>
+                      <div className="mt-2 text-3xl font-bold text-yellow-400">{valueBets.length}</div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4">
+                    {analyzedGames.map(({ game, prediction }, index) => (
+                      <div key={`${game.id}-${index}`} className="overflow-hidden rounded-[28px] bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_transparent_44%),linear-gradient(180deg,rgba(9,13,24,0.98),rgba(5,8,18,0.96))] border border-white/10 p-6">
+                        <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-white/8 pb-4">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className={`rounded-full border px-3 py-1 text-xs font-medium ${game.status.state === "in" ? "border-green-500/30 bg-green-500/10 text-green-300" : game.status.state === "post" ? "border-zinc-500/20 bg-zinc-500/10 text-zinc-300" : "border-sky-500/30 bg-sky-500/10 text-sky-300"}`}>
+                              {game.status.shortDetail}
+                            </div>
+                            <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">{game.sportLabel}</div>
+                            {game.bookmaker ? <div className="text-xs text-muted-foreground">via {game.bookmaker}</div> : null}
+                          </div>
+                          <div className="text-sm text-muted-foreground">
+                            {game.displayTime}{game.broadcast ? ` · ${game.broadcast}` : ""}
+                          </div>
+                        </div>
+
+                        <div className="grid md:grid-cols-3 gap-6 items-start">
+                          <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-center md:text-left">
+                            <div className="flex items-center gap-3 justify-center md:justify-start mb-3">
+                              {game.homeLogo ? <img src={game.homeLogo} alt={game.homeTeam} className="h-10 w-10 rounded-full bg-white/5 object-contain p-1" /> : null}
+                              <div>
+                                <div className="text-xs text-muted-foreground uppercase tracking-[0.24em]">Home</div>
+                                <h3 className="text-lg font-bold text-white">{game.homeTeam}</h3>
+                              </div>
+                            </div>
+                            <div className="space-y-2 text-sm">
+                              <div className="flex justify-between"><span className="text-muted-foreground">Score</span><span className="text-white font-medium">{game.homeScore ?? "-"}</span></div>
+                              <div className="flex justify-between"><span className="text-muted-foreground">Moneyline</span><span className="text-white font-medium">{game.odds ? formatOdds(game.odds.homeMoneyline) : "Pending"}</span></div>
+                              <div className="flex justify-between"><span className="text-muted-foreground">Raw edge</span><span className={prediction ? (prediction.homeEdge > 0 ? "text-green-400 font-medium" : "text-red-400 font-medium") : "text-muted-foreground"}>{prediction ? formatEdge(prediction.homeEdge) : "Waiting"}</span></div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-center">
+                            <div className="text-xs uppercase tracking-[0.3em] text-muted-foreground">Market pulse</div>
+                            <div className="text-2xl font-bold text-white">{game.awayAbbr} @ {game.homeAbbr}</div>
+                            <div className="flex flex-wrap justify-center gap-2 text-xs text-muted-foreground">
+                              <div className="rounded-full border border-white/10 px-3 py-1">Spread {game.odds?.spread !== undefined ? `${game.odds.spread > 0 ? "+" : ""}${game.odds.spread}` : "Pending"}</div>
+                              <div className="rounded-full border border-white/10 px-3 py-1">O/U {game.odds?.overUnder ?? "Pending"}</div>
+                            </div>
+                            {prediction ? (
+                              <div className="rounded-2xl border border-brand-500/30 bg-brand-500/10 px-4 py-3 w-full">
+                                <div className="text-xs text-muted-foreground mb-1">Model pick</div>
+                                <div className="text-white font-bold">{prediction.predictedWinner}</div>
+                                <div className="text-sm text-brand-300">{formatProb(prediction.confidence)} confidence</div>
+                                <div className="mt-2 flex items-center justify-between gap-3 text-sm">
+                                  <span className="text-muted-foreground">Exec edge</span>
+                                  <span className={prediction.executionAdjustedEdge >= 0 ? "font-semibold text-brand-300" : "font-semibold text-red-300"}>
+                                    {formatEdge(prediction.executionAdjustedEdge)}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                                  <span>Window</span>
+                                  <span>{prediction.executionFactors.executionWindow}</span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="text-sm text-muted-foreground max-w-xs">No posted line yet, so the model is holding its fire instead of faking a recommendation.</div>
+                            )}
+                            {prediction?.valueBet ? (
+                              <div className="rounded-full bg-green-500/10 border border-green-500/30 px-3 py-1 text-xs text-green-300 font-medium">
+                                Value bet flagged · {formatEdge(prediction.valueBet.executionAdjustedEdge)} adj. edge
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-center md:text-right">
+                            <div className="flex items-center gap-3 justify-center md:justify-end mb-3">
+                              <div>
+                                <div className="text-xs text-muted-foreground uppercase tracking-[0.24em]">Away</div>
+                                <h3 className="text-lg font-bold text-white">{game.awayTeam}</h3>
+                              </div>
+                              {game.awayLogo ? <img src={game.awayLogo} alt={game.awayTeam} className="h-10 w-10 rounded-full bg-white/5 object-contain p-1" /> : null}
+                            </div>
+                            <div className="space-y-2 text-sm">
+                              <div className="flex justify-between"><span className="text-muted-foreground">Score</span><span className="text-white font-medium">{game.awayScore ?? "-"}</span></div>
+                              <div className="flex justify-between"><span className="text-muted-foreground">Moneyline</span><span className="text-white font-medium">{game.odds ? formatOdds(game.odds.awayMoneyline) : "Pending"}</span></div>
+                              <div className="flex justify-between"><span className="text-muted-foreground">Raw edge</span><span className={prediction ? (prediction.awayEdge > 0 ? "text-green-400 font-medium" : "text-red-400 font-medium") : "text-muted-foreground"}>{prediction ? formatEdge(prediction.awayEdge) : "Waiting"}</span></div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </TabsContent>
+
+            {/* Value Bets Tab */}
+            <TabsContent value="value" className="space-y-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-bold text-white">Value Bets</h2>
+                <div className="text-sm text-muted-foreground">
+                  Min Edge: {minEdge}% | Kelly: {(kellyFraction * 100).toFixed(0)}%
+                </div>
+              </div>
+
+              {/* Settings */}
+              <div className="rounded-xl bg-card border border-border p-6 mb-6">
+                <h3 className="text-lg font-semibold text-white mb-4">Settings</h3>
+                <div className="grid md:grid-cols-3 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-sm text-muted-foreground flex items-center gap-2">
+                      <DollarSign className="w-4 h-4" />
+                      Bankroll: ${bankroll}
+                    </label>
+                    <Slider
+                      value={[bankroll]}
+                      onValueChange={(v) => setBankroll(v[0])}
+                      min={100}
+                      max={10000}
+                      step={100}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm text-muted-foreground flex items-center gap-2">
+                      <Percent className="w-4 h-4" />
+                      Min Edge: {minEdge}%
+                    </label>
+                    <Slider
+                      value={[minEdge]}
+                      onValueChange={(v) => setMinEdge(v[0])}
+                      min={0}
+                      max={10}
+                      step={0.5}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm text-muted-foreground flex items-center gap-2">
+                      <Target className="w-4 h-4" />
+                      Kelly Fraction: {(kellyFraction * 100).toFixed(0)}%
+                    </label>
+                    <Slider
+                      value={[kellyFraction]}
+                      onValueChange={(v) => setKellyFraction(v[0])}
+                      min={0.1}
+                      max={1}
+                      step={0.05}
+                      className="w-full"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {valueBets.length > 0 ? (
+                <div className="space-y-4">
+                  {/* Summary */}
+                  <div className="grid grid-cols-3 gap-4 mb-6">
+                    <div className="text-center p-4 rounded-xl bg-green-500/10 border border-green-500/20">
+                      <div className="text-2xl font-bold text-green-400">{valueBets.length}</div>
+                      <div className="text-sm text-muted-foreground">Value Bets</div>
+                    </div>
+                    <div className="text-center p-4 rounded-xl bg-brand-500/10 border border-brand-500/20">
+                      <div className="text-2xl font-bold text-brand-400">
+                        ${valueBets.reduce((sum, p) => sum + (p.valueBet?.suggestedBet || 0), 0).toFixed(0)}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Total Stake</div>
+                    </div>
+                    <div className="text-center p-4 rounded-xl bg-gold-500/10 border border-gold-500/20">
+                      <div className="text-2xl font-bold text-yellow-400">
+                        +{(valueBets.reduce((sum, p) => sum + (p.valueBet?.edge || 0), 0) / valueBets.length).toFixed(1)}%
+                      </div>
+                      <div className="text-sm text-muted-foreground">Avg Edge</div>
+                    </div>
+                  </div>
+
+                  {/* Value Bet Cards */}
+                  {valueBets.map((pred, index) => pred.valueBet && (
+                    <div key={index} className="rounded-xl bg-gradient-to-r from-green-500/10 to-brand-500/10 border border-green-500/30 p-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-green-500/20">
+                            <Target className="w-5 h-5 text-green-400" />
+                          </div>
+                          <div>
+                            <h3 className="text-lg font-bold text-white">{pred.valueBet.team}</h3>
+                            <p className="text-sm text-muted-foreground">
+                              {pred.valueBet.location} vs {pred.valueBet.location === 'Home' ? pred.awayTeam : pred.homeTeam}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-2xl font-bold text-green-400">{formatEdge(pred.valueBet.edge)}</div>
+                          <div className="text-sm text-muted-foreground">Edge</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-4 gap-4 text-center">
+                        <div>
+                          <div className="text-lg font-bold text-white">{formatProb(pred.valueBet.modelProb)}</div>
+                          <div className="text-xs text-muted-foreground">Model Prob</div>
+                        </div>
+                        <div>
+                          <div className="text-lg font-bold text-white">{formatOdds(pred.valueBet.odds)}</div>
+                          <div className="text-xs text-muted-foreground">Odds</div>
+                        </div>
+                        <div>
+                          <div className="text-lg font-bold text-white">{(pred.valueBet.kellyPct * 100).toFixed(1)}%</div>
+                          <div className="text-xs text-muted-foreground">Kelly %</div>
+                        </div>
+                        <div>
+                          <div className="text-lg font-bold text-brand-400">${pred.valueBet.suggestedBet.toFixed(0)}</div>
+                          <div className="text-xs text-muted-foreground">Bet Size</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-12 rounded-xl bg-card border border-border">
+                  <Target className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                  <h3 className="text-lg font-semibold text-white mb-2">No Value Bets Found</h3>
+                  <p className="text-muted-foreground">
+                    Try lowering the minimum edge threshold to find more opportunities.
+                  </p>
+                </div>
+              )}
+            </TabsContent>
+
+            {/* Backtest Tab */}
+            <TabsContent value="backtest" className="space-y-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-bold text-white">{sportName} - Historical Backtest</h2>
+                <Button
+                  onClick={runBacktest}
+                  disabled={isBacktesting}
+                  className="bg-brand-600 hover:bg-brand-700"
+                >
+                  {isBacktesting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Running...
+                    </>
+                  ) : (
+                    <>
+                      <Activity className="mr-2 h-4 w-4" />
+                      Run 6-Month Backtest
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {backtestSummary ? (
+                <div className="space-y-6">
+                  {/* Summary Stats */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                    <div className="text-center p-4 rounded-xl bg-card border border-border">
+                      <div className="text-2xl font-bold text-white">{backtestSummary.totalGames}</div>
+                      <div className="text-xs text-muted-foreground">Total Games</div>
+                    </div>
+                    <div className="text-center p-4 rounded-xl bg-card border border-border">
+                      <div className="text-2xl font-bold text-brand-400">{(backtestSummary.accuracy * 100).toFixed(1)}%</div>
+                      <div className="text-xs text-muted-foreground">Accuracy</div>
+                    </div>
+                    <div className="text-center p-4 rounded-xl bg-card border border-border">
+                      <div className={`text-2xl font-bold ${backtestSummary.totalProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {formatMoney(backtestSummary.totalProfit)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">Total Profit</div>
+                    </div>
+                    <div className="text-center p-4 rounded-xl bg-card border border-border">
+                      <div className={`text-2xl font-bold ${backtestSummary.roi >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {backtestSummary.roi.toFixed(1)}%
+                      </div>
+                      <div className="text-xs text-muted-foreground">ROI</div>
+                    </div>
+                    <div className="text-center p-4 rounded-xl bg-card border border-border">
+                      <div className="text-2xl font-bold text-yellow-400">{backtestSummary.sharpeRatio.toFixed(2)}</div>
+                      <div className="text-xs text-muted-foreground">Sharpe Ratio</div>
+                    </div>
+                  </div>
+
+                  {/* Detailed Stats */}
+                  <div className="grid md:grid-cols-2 gap-6">
+                    <div className="rounded-xl bg-card border border-border p-6">
+                      <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                        <Target className="w-5 h-5 text-brand-400" />
+                        Betting Performance
+                      </h3>
+                      <div className="space-y-3">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Total Bets Placed</span>
+                          <span className="text-white font-medium">{backtestSummary.totalBets}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Winning Bets</span>
+                          <span className="text-green-400 font-medium">{backtestSummary.winningBets}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Bet Win Rate</span>
+                          <span className="text-white font-medium">{(backtestSummary.betWinRate * 100).toFixed(1)}%</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Max Drawdown</span>
+                          <span className="text-red-400 font-medium">{formatMoney(-backtestSummary.maxDrawdown)}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl bg-card border border-border p-6">
+                      <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                        <Calendar className="w-5 h-5 text-brand-400" />
+                        Monthly Breakdown
+                      </h3>
+                      <div className="space-y-2 max-h-48 overflow-y-auto">
+                        {backtestSummary.profitByMonth.map((month, idx) => (
+                          <div key={idx} className="flex justify-between items-center">
+                            <span className="text-muted-foreground text-sm">{month.month}</span>
+                            <div className="flex gap-4">
+                              <span className={`text-sm font-medium ${month.profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {formatMoney(month.profit)}
+                              </span>
+                              <span className="text-xs text-muted-foreground">
+                                ({formatMoney(month.cumulative)})
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Cumulative Profit Chart */}
+                  <div className="rounded-xl bg-card border border-border p-6">
+                    <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                      <LineChartIcon className="w-5 h-5 text-brand-400" />
+                      Cumulative Profit Over Time
+                    </h3>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={backtestSummary.profitByMonth}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                          <XAxis dataKey="month" stroke="#888" fontSize={12} />
+                          <YAxis stroke="#888" fontSize={12} tickFormatter={(v) => `$${v}`} />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333' }}
+                            labelStyle={{ color: '#fff' }}
+                            formatter={(value: number) => [`$${value.toFixed(0)}`, 'Cumulative']}
+                          />
+                          <Line 
+                            type="monotone" 
+                            dataKey="cumulative" 
+                            stroke="#22c55e" 
+                            strokeWidth={2}
+                            dot={{ fill: '#22c55e', strokeWidth: 2 }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Monthly Profit Bar Chart */}
+                  <div className="rounded-xl bg-card border border-border p-6">
+                    <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                      <BarChart3 className="w-5 h-5 text-brand-400" />
+                      Monthly Profit/Loss
+                    </h3>
+                    <div className="h-48">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={backtestSummary.profitByMonth}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                          <XAxis dataKey="month" stroke="#888" fontSize={12} />
+                          <YAxis stroke="#888" fontSize={12} tickFormatter={(v) => `$${v}`} />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333' }}
+                            labelStyle={{ color: '#fff' }}
+                            formatter={(value: number) => [`$${value.toFixed(0)}`, 'Profit']}
+                          />
+                          <Bar 
+                            dataKey="profit" 
+                            fill="#3b82f6"
+                            radius={[4, 4, 0, 0]}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-16 rounded-xl bg-card border border-border">
+                  <Activity className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
+                  <h3 className="text-xl font-semibold text-white mb-2">Run a Backtest</h3>
+                  <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                    Simulate 6 months of historical {sportName} games to see how our ML model would have performed.
+                  </p>
+                  <Button
+                    onClick={runBacktest}
+                    disabled={isBacktesting}
+                    className="bg-brand-600 hover:bg-brand-700"
+                  >
+                    {isBacktesting ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Running Backtest...
+                      </>
+                    ) : (
+                      <>
+                        <Activity className="mr-2 h-4 w-4" />
+                        Start Backtest
+                      </>
+                    )}
+                  </Button>
+                </div>
+                          )}
+                        </TabsContent>
+
+                        {/* Performance Tab */}
+                        <TabsContent value="performance" className="space-y-6">
+                          <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-2xl font-bold text-white">Historical Performance</h2>
+                            <Button
+                              onClick={() => setPerformanceData(generatePerformanceData())}
+                              variant="outline"
+                              className="border-border text-muted-foreground hover:text-white"
+                            >
+                              <Activity className="mr-2 h-4 w-4" />
+                              Refresh Data
+                            </Button>
+                          </div>
+
+                          {performanceData ? (
+                            <div className="space-y-6">
+                              {/* Overall Stats */}
+                              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                                <div className="text-center p-4 rounded-xl bg-card border border-border">
+                                  <div className="text-2xl font-bold text-brand-400">{(performanceData.overallWinRate * 100).toFixed(1)}%</div>
+                                  <div className="text-xs text-muted-foreground">Win Rate</div>
+                                </div>
+                                <div className="text-center p-4 rounded-xl bg-card border border-border">
+                                  <div className={`text-2xl font-bold ${performanceData.overallROI >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    {performanceData.overallROI.toFixed(1)}%
+                                  </div>
+                                  <div className="text-xs text-muted-foreground">ROI</div>
+                                </div>
+                                <div className="text-center p-4 rounded-xl bg-card border border-border">
+                                  <div className={`text-2xl font-bold ${performanceData.totalProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    {formatMoney(performanceData.totalProfit)}
+                                  </div>
+                                  <div className="text-xs text-muted-foreground">Total Profit</div>
+                                </div>
+                                <div className="text-center p-4 rounded-xl bg-card border border-border">
+                                  <div className={`text-2xl font-bold ${performanceData.currentStreak >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    {performanceData.currentStreak > 0 ? `+${performanceData.currentStreak}` : performanceData.currentStreak}
+                                  </div>
+                                  <div className="text-xs text-muted-foreground">Current Streak</div>
+                                </div>
+                                <div className="text-center p-4 rounded-xl bg-card border border-border">
+                                  <div className="text-2xl font-bold text-yellow-400">{performanceData.longestStreak}</div>
+                                  <div className="text-xs text-muted-foreground">Best Streak</div>
+                                </div>
+                              </div>
+
+                              {/* Weekly Performance Chart */}
+                              <div className="rounded-xl bg-card border border-border p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                  <LineChartIcon className="w-5 h-5 text-brand-400" />
+                                  Weekly Win Rate Trend
+                                </h3>
+                                <div className="h-64">
+                                  <ResponsiveContainer width="100%" height="100%">
+                                    <LineChart data={performanceData.weeklyData}>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                                      <XAxis dataKey="week" stroke="#888" fontSize={12} />
+                                      <YAxis stroke="#888" fontSize={12} tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} domain={[0.4, 0.8]} />
+                                      <Tooltip 
+                                        contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333' }}
+                                        labelStyle={{ color: '#fff' }}
+                                        formatter={(value: number) => [`${(value * 100).toFixed(1)}%`, 'Win Rate']}
+                                      />
+                                      <Line 
+                                        type="monotone" 
+                                        dataKey="winRate" 
+                                        stroke="#22c55e" 
+                                        strokeWidth={2}
+                                        dot={{ fill: '#22c55e', strokeWidth: 2 }}
+                                      />
+                                    </LineChart>
+                                  </ResponsiveContainer>
+                                </div>
+                              </div>
+
+                              {/* Weekly Profit Bar Chart */}
+                              <div className="rounded-xl bg-card border border-border p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                  <BarChart3 className="w-5 h-5 text-brand-400" />
+                                  Weekly Profit/Loss
+                                </h3>
+                                <div className="h-48">
+                                  <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={performanceData.weeklyData}>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                                      <XAxis dataKey="week" stroke="#888" fontSize={12} />
+                                      <YAxis stroke="#888" fontSize={12} tickFormatter={(v) => `$${v}`} />
+                                      <Tooltip 
+                                        contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333' }}
+                                        labelStyle={{ color: '#fff' }}
+                                        formatter={(value: number) => [`$${value}`, 'Profit']}
+                                      />
+                                      <Bar 
+                                        dataKey="profit" 
+                                        fill="#3b82f6"
+                                        radius={[4, 4, 0, 0]}
+                                      />
+                                    </BarChart>
+                                  </ResponsiveContainer>
+                                </div>
+                              </div>
+
+                              {/* Sport Breakdown */}
+                              <div className="rounded-xl bg-card border border-border p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                  <Trophy className="w-5 h-5 text-brand-400" />
+                                  Performance by Sport
+                                </h3>
+                                <div className="grid md:grid-cols-3 gap-4">
+                                  {performanceData.sportBreakdown.map((sport) => (
+                                    <div key={sport.sport} className="p-4 rounded-lg bg-secondary border border-border">
+                                      <div className="flex items-center justify-between mb-3">
+                                        <span className="text-lg font-bold text-white">{sport.sport.toUpperCase()}</span>
+                                        <span className={`text-sm font-medium ${sport.roi >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                          {sport.roi > 0 ? '+' : ''}{sport.roi.toFixed(1)}% ROI
+                                        </span>
+                                      </div>
+                                      <div className="space-y-2 text-sm">
+                                        <div className="flex justify-between">
+                                          <span className="text-muted-foreground">Record</span>
+                                          <span className="text-white">{sport.wins}-{sport.losses}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-muted-foreground">Win Rate</span>
+                                          <span className="text-brand-400">{(sport.winRate * 100).toFixed(1)}%</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-muted-foreground">Profit</span>
+                                          <span className={sport.profit >= 0 ? 'text-green-400' : 'text-red-400'}>
+                                            {formatMoney(sport.profit)}
+                                          </span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-muted-foreground">Best Week</span>
+                                          <span className="text-green-400">{formatMoney(sport.bestWeek)}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                          <span className="text-muted-foreground">Worst Week</span>
+                                          <span className="text-red-400">{formatMoney(sport.worstWeek)}</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-center py-16 rounded-xl bg-card border border-border">
+                              <Trophy className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
+                              <h3 className="text-xl font-semibold text-white mb-2">View Performance History</h3>
+                              <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                                Track our ML model's historical performance across all sports with detailed metrics and charts.
+                              </p>
+                              <Button
+                                onClick={() => setPerformanceData(generatePerformanceData())}
+                                className="bg-brand-600 hover:bg-brand-700"
+                              >
+                                <Trophy className="mr-2 h-4 w-4" />
+                                Load Performance Data
+                              </Button>
+                            </div>
+                          )}
+                        </TabsContent>
+
+                        {/* Analyze Game Tab */}
+                        <TabsContent value="analyze" className="space-y-6">
+                          <div className="rounded-2xl bg-card border border-border p-8 glow-green">
+                            <div className="flex items-center gap-3 mb-6">
+                              <div className="p-2 rounded-lg bg-brand-500/20">
+                                <Trophy className="w-6 h-6 text-brand-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-white">Game Analyzer</h2>
+                    <p className="text-muted-foreground">Enter any {sportName} matchup for instant ML analysis</p>
+                  </div>
+                </div>
+
+                <form
+                  className="space-y-4"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void analyzeBetting();
+                  }}
+                >
+                  <div className="space-y-2">
+                    <label
+                      htmlFor="game-analysis-input"
+                      className="text-sm font-medium text-muted-foreground"
+                    >
+                      Enter Game Details
+                    </label>
+                    <Textarea
+                      id="game-analysis-input"
+                      name="game-analysis"
+                      placeholder="e.g., Lakers vs Warriors, Celtics @ Heat, Nuggets vs Suns…"
+                      value={gameInput}
+                      onChange={(e) => setGameInput(e.target.value)}
+                      className="min-h-[100px] resize-none bg-secondary border-border text-white placeholder:text-muted-foreground focus:ring-brand-500"
+                    />
+                  </div>
+
+                  <Button
+                    type="submit"
+                    className="w-full h-12 bg-brand-600 hover:bg-brand-700 text-white font-semibold text-lg"
+                    disabled={isLoading}
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                        Running ML Prediction...
+                      </>
+                    ) : (
+                      <>
+                        <Brain className="mr-2 h-5 w-5" />
+                        Get ML Prediction
+                      </>
+                    )}
+                  </Button>
+
+                  {bettingAdvice && (
+                    <div className="mt-6 space-y-3 animate-in fade-in-50 slide-in-from-bottom-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <BarChart3 className="w-5 h-5 text-brand-400" />
+                          <span className="font-semibold text-white">ML Analysis Result</span>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={copyToClipboard}
+                          className="text-muted-foreground hover:text-white"
+                        >
+                          <Copy className="h-4 w-4 mr-2" />
+                          Copy
+                        </Button>
+                      </div>
+                      <div className="relative rounded-xl overflow-hidden">
+                        <div className="absolute inset-0 bg-gradient-to-br from-brand-500/10 to-gold-500/10" />
+                        <pre className="relative p-6 text-sm text-white whitespace-pre-wrap font-mono leading-relaxed">
+                          {bettingAdvice}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </form>
+              </div>
+            </TabsContent>
+          </Tabs>
+        </div>
+      </section>
+
+      {/* Features Section */}
+      <section className="py-16 px-6 bg-card/30">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
+              What the product actually gives you
+            </h2>
+            <p className="text-muted-foreground max-w-2xl mx-auto">
+              Model output is only useful if it helps you decide faster, size better, and see where the edge comes from.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+            {features.map((feature, index) => (
+              <div 
+                key={index}
+                className="p-6 rounded-xl bg-card border border-border hover:border-brand-500/50 transition-colors group"
+              >
+                <div className="p-3 rounded-lg bg-brand-500/10 w-fit mb-4 group-hover:bg-brand-500/20 transition-colors">
+                  <feature.icon className="w-6 h-6 text-brand-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-white mb-2">{feature.title}</h3>
+                <p className="text-sm text-muted-foreground">{feature.description}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section id="edge-system" className="py-18 px-6 border-t border-border/60 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.10),_transparent_48%),linear-gradient(180deg,rgba(5,8,18,0.98),rgba(9,13,24,0.98))]">
+        <div className="max-w-6xl mx-auto">
+          <div className="grid gap-10 lg:grid-cols-[1.15fr_0.85fr] lg:items-start">
+            <div>
+              <p className="mb-3 text-xs uppercase tracking-[0.24em] text-brand-300/80">Advantage thesis</p>
+              <h2 className="mb-4 text-3xl font-bold text-white md:text-4xl">The next-level edge is execution, not louder picks.</h2>
+              <p className="mb-6 max-w-2xl leading-relaxed text-muted-foreground">
+                There is no magic single formula. The real edge is an operating system that combines model signal, better prices, faster timing, disciplined sizing, and ruthless CLV-based evaluation.
+              </p>
+
+              <div className="mb-6 rounded-3xl border border-brand-500/20 bg-brand-500/10 p-6">
+                <p className="mb-3 text-xs uppercase tracking-[0.24em] text-brand-300/80">Execution-adjusted edge</p>
+                <div className="text-lg font-semibold leading-relaxed text-white md:text-xl">
+                  Raw Edge x Calibration x CLV x Timing x Market Dislocation x Liquidity - Risk Penalties
+                </div>
+                <p className="mt-3 text-sm text-muted-foreground">
+                  Then size with quarter-Kelly, cap exposure, and only trust the score when the market and the close history support it.
+                </p>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                {executionFormulaTerms.map((term) => (
+                  <div key={term.label} className="rounded-2xl border border-border bg-card/45 p-4">
+                    <p className={`mb-2 text-sm font-semibold ${term.accent}`}>{term.label}</p>
+                    <p className="text-sm leading-relaxed text-muted-foreground">{term.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-5">
+              <div className="rounded-3xl border border-border bg-card/45 p-6">
+                <p className="mb-3 text-xs uppercase tracking-[0.24em] text-brand-300/80">How AI Advantage wins</p>
+                <div className="space-y-3">
+                  {executionSystemSteps.map((step, index) => (
+                    <div key={step} className="flex items-start gap-3 rounded-2xl border border-white/8 bg-black/20 p-4">
+                      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-sm font-semibold text-brand-300">{index + 1}</div>
+                      <p className="text-sm leading-relaxed text-muted-foreground">{step}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-border bg-card/45 p-6">
+                <div className="mb-4 flex items-center justify-between gap-4">
+                  <div>
+                    <p className="mb-2 text-xs uppercase tracking-[0.24em] text-brand-300/80">Build sequence</p>
+                    <h3 className="text-2xl font-semibold text-white">Three phases to go next level</h3>
+                  </div>
+                  <a
+                    href="https://github.com/ianalloway/ai-advantage/blob/main/docs/advantage_operating_system.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 text-sm text-brand-300 transition-colors hover:text-white"
+                  >
+                    Read full playbook
+                    <ChevronRight className="h-4 w-4" />
+                  </a>
+                </div>
+                <div className="space-y-3">
+                  {growthRoadmap.map((item) => (
+                    <div key={item.phase} className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                      <p className="mb-2 text-xs uppercase tracking-[0.24em] text-brand-300/80">{item.phase}</p>
+                      <h4 className="mb-1 font-semibold text-white">{item.title}</h4>
+                      <p className="text-sm leading-relaxed text-muted-foreground">{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Sports Stack */}
+      <section id="sports-stack" className="py-18 px-6 border-t border-border/60 bg-gradient-to-b from-black/20 to-card/20">
+        <div className="max-w-6xl mx-auto">
+          <div className="max-w-3xl mb-12">
+            <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">The sports analytics stack behind the site</h2>
+            <p className="text-muted-foreground text-base leading-relaxed">
+              AI Advantage is the front door, but the actual sports system is a full repo ecosystem: model training, ratings, CLV evaluation, odds tooling, bankroll sizing, and research utilities.
+            </p>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            {sportsRepoGroups.map((group) => (
+              <div key={group.title} className="rounded-3xl border border-border bg-card/45 p-6 backdrop-blur-sm">
+                <div className="mb-5">
+                  <p className="text-xs uppercase tracking-[0.2em] text-brand-400/70 mb-2">Sports Stack</p>
+                  <h3 className="text-2xl font-semibold text-white mb-2">{group.title}</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">{group.summary}</p>
+                </div>
+
+                <div className="space-y-3">
+                  {group.repos.map((repo) => (
+                    <a
+                      key={repo.name}
+                      href={repo.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group block rounded-2xl border border-border bg-black/25 p-4 transition-colors hover:border-brand-500/40 hover:bg-black/40"
+                    >
+                      <div className="flex items-start justify-between gap-4 mb-2">
+                        <div>
+                          <p className="text-white font-semibold group-hover:text-brand-300 transition-colors">{repo.name}</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-brand-400/70 mt-1">{repo.role}</p>
+                        </div>
+                        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-brand-300 transition-colors shrink-0 mt-1" />
+                      </div>
+                      <p className="text-sm text-muted-foreground leading-relaxed">{repo.desc}</p>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Pricing Section */}
+      <section id="pricing" className="py-20 px-6 bg-card/30">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
+              Choose Your Plan
+            </h2>
+            <p className="text-muted-foreground max-w-2xl mx-auto">
+              Start with the free workflow, unlock one-off premium access, or subscribe if you want the full operating system.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto">
+            {/* Free Plan */}
+            <div className="p-8 rounded-2xl bg-card border border-border flex flex-col">
+              <div className="text-center mb-6">
+                <h3 className="text-2xl font-bold text-white mb-2">Free</h3>
+                <div className="text-4xl font-bold text-white">$0</div>
+                <p className="text-muted-foreground text-sm">Forever free</p>
+              </div>
+              <ul className="space-y-3 mb-8 flex-1">
+                {FREE_FEATURES.map((feature, i) => (
+                  <li key={i} className="flex items-center gap-3 text-muted-foreground text-sm">
+                    <Check className="w-4 h-4 text-brand-400 flex-shrink-0" />
+                    {feature}
+                  </li>
+                ))}
+              </ul>
+              <Button
+                variant="outline"
+                className="w-full border-border text-white hover:bg-brand-500/10"
+                onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+              >
+                Get Started
+              </Button>
+            </div>
+
+            {/* Crypto One-Time Unlock */}
+            <div className="p-8 rounded-2xl bg-gradient-to-br from-yellow-900/30 via-orange-900/20 to-purple-900/30 border border-yellow-500/30 relative flex flex-col">
+              <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 rounded-full bg-gradient-to-r from-yellow-500 to-orange-500 text-white text-sm font-bold whitespace-nowrap">
+                🔥 Pay Once in Crypto
+              </div>
+              <div className="text-center mb-6 mt-2">
+                <h3 className="text-2xl font-bold text-white mb-2 flex items-center justify-center gap-2">
+                  <Bitcoin className="w-6 h-6 text-yellow-400" />
+                  Crypto Unlock
+                </h3>
+                <div className="text-4xl font-bold text-white">$10<span className="text-lg text-muted-foreground"> one-time</span></div>
+                <p className="text-muted-foreground text-sm">ETH or USDC · Login + logout included</p>
+              </div>
+
+              {/* Two unlock options */}
+              <div className="space-y-3 mb-8 flex-1">
+                {/* Big Game */}
+                <button
+                  className="w-full p-4 rounded-xl border border-yellow-500/40 bg-yellow-500/10 hover:bg-yellow-500/20 transition-colors text-left group"
+                  onClick={() => {
+                    setCryptoUnlockType("big-game");
+                    setShowCryptoModal(true);
+                  }}
+                >
+                  <div className="flex items-center gap-3 mb-1">
+                    <Trophy className="w-5 h-5 text-yellow-400 flex-shrink-0" />
+                    <span className="text-white font-semibold text-sm">The Big Game Pass</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground pl-8">
+                    Championship AI picks, prop models & live line alerts for every playoff game
+                  </p>
+                </button>
+
+                {/* Knowledge Vault */}
+                <button
+                  className="w-full p-4 rounded-xl border border-purple-500/40 bg-purple-500/10 hover:bg-purple-500/20 transition-colors text-left group"
+                  onClick={() => {
+                    setCryptoUnlockType("knowledge-vault");
+                    setShowCryptoModal(true);
+                  }}
+                >
+                  <div className="flex items-center gap-3 mb-1">
+                    <Brain className="w-5 h-5 text-purple-400 flex-shrink-0" />
+                    <span className="text-white font-semibold text-sm">Knowledge Vault</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground pl-8">
+                    Full AI model access, 3-year backtests, advanced metrics & unlimited analysis
+                  </p>
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Button
+                  className="w-full bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white font-bold h-11"
+                  onClick={() => {
+                    setCryptoUnlockType("big-game");
+                    setShowCryptoModal(true);
+                  }}
+                >
+                  <Flame className="w-4 h-4 mr-2" />
+                  {hasPaidAccess ? "Paid access active" : "Unlock for $10 in Crypto"}
+                </Button>
+                {!hasPaidAccess && (
+                  <Button
+                    variant="outline"
+                    className="w-full border-brand-500/30 text-brand-400 hover:bg-brand-500/10 font-semibold"
+                    onClick={() => handleUpgrade('one-time')}
+                  >
+                    <DollarSign className="w-4 h-4 mr-2" />
+                    Pay with Card ($10)
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* Monthly Premium Plan */}
+            <div className="p-8 rounded-2xl bg-gradient-to-br from-brand-900/50 to-brand-800/30 border border-brand-500/30 relative flex flex-col">
+              <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 rounded-full bg-brand-500 text-white text-sm font-medium whitespace-nowrap">
+                Most Complete
+              </div>
+              <div className="text-center mb-6 mt-2">
+                <h3 className="text-2xl font-bold text-white mb-2 flex items-center justify-center gap-2">
+                  <Crown className="w-6 h-6 text-yellow-400" />
+                  Pro Monthly
+                </h3>
+                <div className="text-4xl font-bold text-white">$15<span className="text-lg text-muted-foreground">/mo</span></div>
+                <p className="text-muted-foreground text-sm">Cancel anytime</p>
+              </div>
+              <ul className="space-y-3 mb-8 flex-1">
+                {PREMIUM_FEATURES.map((feature, i) => (
+                  <li key={i} className="flex items-center gap-3 text-white text-sm">
+                    <Check className="w-4 h-4 text-brand-400 flex-shrink-0" />
+                    {feature}
+                  </li>
+                ))}
+              </ul>
+              <Button
+                className="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold"
+                onClick={handleUpgrade}
+              >
+                {hasFullVaultAccess ? (
+                  <>
+                    <Check className="mr-2 h-5 w-5" />
+                    Premium Active
+                  </>
+                ) : (
+                  <>
+                    <Crown className="mr-2 h-5 w-5" />
+                    Upgrade to Pro
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Crypto Payment Modal */}
+      <CryptoPaymentModal
+        open={showCryptoModal}
+        onOpenChange={setShowCryptoModal}
+        unlockType={cryptoUnlockType}
+        onSuccess={() => {
+          syncAccessUi();
+          toast({
+            title: "🔥 Access Unlocked!",
+            description: "Your crypto payment is saved to an access login. You can now log in and out on this device.",
+          });
+        }}
+      />
+
+      <AccessSessionDialog
+        open={showAccessDialog}
+        onOpenChange={setShowAccessDialog}
+        onSessionChange={syncAccessUi}
+      />
+
+      {/* Email Capture Section */}
+      <section className="py-16 px-6">
+        <div className="max-w-2xl mx-auto text-center">
+          <div className="p-8 rounded-2xl bg-card border border-border">
+            <Mail className="w-12 h-12 text-brand-400 mx-auto mb-4" />
+            <h2 className="text-2xl font-bold text-white mb-2">
+              Get Free Betting Insights
+            </h2>
+            <p className="text-muted-foreground mb-6">
+              Join the official AllowayAI Substack without leaving the site. The subscribe step now happens inside Substack&apos;s supported embedded form.
+            </p>
+            <SubstackEmbed className="mx-auto max-w-xl" />
+            <p className="mt-4 text-xs text-muted-foreground">
+              If the embed does not load,{" "}
+              <a
+                href="https://allowayai.substack.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-brand-300 hover:text-white"
+              >
+                open AllowayAI on Substack directly
+              </a>
+              .
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Donation Section */}
+      <section className="py-12 px-6">
+        <div className="max-w-2xl mx-auto text-center">
+          <div className="p-6 rounded-xl bg-card/50 border border-border">
+            <div className="flex items-center justify-center gap-2 mb-3">
+              <Heart className="w-5 h-5 text-red-400" />
+              <h3 className="text-lg font-semibold text-white">Support Development</h3>
+            </div>
+            <p className="text-sm text-muted-foreground mb-4">
+              If you find AI Advantage helpful, consider supporting with ETH
+            </p>
+            <div className="flex items-center justify-center gap-2">
+              <code className="px-3 py-2 rounded-lg bg-secondary text-sm text-brand-400 font-mono">
+                {ETH_DONATION_ADDRESS.slice(0, 10)}...{ETH_DONATION_ADDRESS.slice(-8)}
+              </code>
+              <Button 
+                variant="outline" 
+                size="sm"
+                onClick={copyEthAddress}
+                className="border-border text-muted-foreground hover:text-white"
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="py-8 px-6 border-t border-border">
+        <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-brand-400" />
+            <span className="font-semibold text-white">AI Advantage Sports</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <Button 
+              variant="ghost" 
+              size="sm"
+              onClick={copyEthAddress}
+              className="text-muted-foreground hover:text-white"
+            >
+              <Heart className="h-4 w-4 mr-2" />
+              Donate ETH
+            </Button>
+          </div>
+          <p className="text-sm text-muted-foreground text-center">
+            For entertainment purposes only. Please gamble responsibly. Must be 21+ to participate.
+          </p>
+        </div>
+      </footer>
+      </main>
+    </div>
+  );
+};
+
+export default Index;

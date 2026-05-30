@@ -1,19 +1,15 @@
-# ai-sports-monorepo
+# ai-sports-monorepo (archived)
 
-Monorepo combining active development from:
+> **This monorepo is retired.** Active development continues in the canonical split repositories:
 
-- `ianalloway/ai-advantage` -> `apps/ai-advantage`
-- `ianalloway/sports-betting-ml` -> `apps/sports-betting-ml`
+- **[ai-advantage](https://github.com/ianalloway/ai-advantage)** — product app (Next.js, live odds, Kelly sizing)
+- **[sports-betting-ml](https://github.com/ianalloway/sports-betting-ml)** — ML models and evaluation pipeline
 
-## Why
+This repo was an experiment combining both apps via `git subtree` under `apps/*`. The split repos are the source of truth and receive all ongoing updates.
 
-Single home for product + model pipeline evolution while preserving each project's full history under its directory via `git subtree`.
+## Historical layout
 
-## Layout
+- `apps/ai-advantage` — imported from `ianalloway/ai-advantage`
+- `apps/sports-betting-ml` — imported from `ianalloway/sports-betting-ml`
 
-- `apps/ai-advantage`
-- `apps/sports-betting-ml`
-
-## History notes
-
-Each app directory history is imported from its original repository default branch.
+Last active: April 2026. Archived as part of GitHub cleanup.

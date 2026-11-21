@@ -1966,7 +1966,7 @@ Always bet responsibly. Past performance does not guarantee future results.`;
               </ul>
               <Button
                 className="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold"
-                onClick={handleUpgrade}
+                onClick={() => handleUpgrade('premium')}
               >
                 {hasFullVaultAccess ? (
                   <>

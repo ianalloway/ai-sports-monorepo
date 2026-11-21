@@ -21,7 +21,10 @@ jobs:
         run: npm ci
 
       - name: Type check
-        run: npx tsc --noEmit
+        run: npm run typecheck
+
+      - name: Test live slates
+        run: npm test
 
       - name: Lint
         run: npx eslint src --ext .ts,.tsx --max-warnings 0 || true
